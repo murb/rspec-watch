@@ -1,4 +1,4 @@
-#!/bin/env ruby
+#!/usr/bin/env ruby
 
 # This is a simple test runner for Rails projects, it requires no configuration.
 # The command can be changed using the RSPEC_COMMAND environment variable.
@@ -14,7 +14,10 @@ gemfile do
   gem 'listen', require: true
 end
 
-RSPEC_COMMAND = ENV.fetch('RSPEC_COMMAND') { 'bundle exec rspec -f doc' }
+SPRING_ENABLED = $ARGV.include?("--spring")
+ONLY_FAILURES = $ARGV.include?("--only-failures")
+RSPEC_FOCUS = $ARGV.find{|arg| arg.match?("_spec.rb")}
+RSPEC_COMMAND = ENV.fetch('RSPEC_COMMAND') { "bundle exec #{"spring " if SPRING_ENABLED}rspec -f doc  #{"--only-failures" if ONLY_FAILURES}" }
 
 trap 'SIGINT' do
   puts 'Exiting...'
@@ -23,6 +26,7 @@ end
 
 def run_spec(test_file)
   command = "#{RSPEC_COMMAND} #{test_file}"
+  puts "Running #{command} ..."
   Kernel.system(command)
   result = $CHILD_STATUS
   errors = (result == 0) || "Failed to run: #{test_file}"
@@ -32,15 +36,19 @@ end
 def spec_file(path)
   test_file_string = path.to_s
 
-  test_file = if test_file_string.end_with?('_spec.rb') && test_file_string.start_with?('spec/')
+  test_file = if RSPEC_FOCUS
+                RSPEC_FOCUS
+              elsif test_file_string.end_with?('_spec.rb') && test_file_string.start_with?('spec/')
                 path
+              elsif test_file_string.start_with?('app/controllers')
+                File.join('./spec', 'requests', path.relative_path_from('app/controllers')).sub('_controller.rb', '_spec.rb') || File.join('./spec', path.relative_path_from('app/')).sub('.rb', '_spec.rb')
               elsif test_file_string.start_with?('app/')
                 File.join('./spec', path.relative_path_from('app/')).sub('.rb', '_spec.rb')
               elsif test_file_string.start_with?('lib/')
                 File.join('./spec', path).sub('.rb', '_spec.rb')
               end
 
-  test_file && File.exist?(test_file) ? test_file : nil
+  test_file && (File.exist?(test_file) || RSPEC_FOCUS) ? test_file : nil
 end
 
 queue = Queue.new
@@ -51,11 +59,16 @@ listener = Listen.to('./app', './lib', './spec', relative: true, only: /.rb$/) d
   files = modified + added
 
   files.map { |path_name| Pathname.new(path_name) }.each do |path|
-    next unless (test_file = spec_file(path))
-
-    queue << test_file
+    if (test_file = spec_file(path))
+      queue << test_file
+    else
+      puts "No testfile found for #{path}..."
+    end
   end
 end
+
+puts "Started listening..."
+puts "  Focussing only on #{RSPEC_FOCUS}" if RSPEC_FOCUS
 
 background_fiber = Fiber.new do
   listener.start
