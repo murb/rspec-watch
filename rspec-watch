@@ -1,31 +1,36 @@
 #!/usr/bin/env ruby
 
 # This is a simple test runner for Rails projects, it requires no configuration.
-# The command can be changed using the RSPEC_COMMAND environment variable.
-# It will check the app, lib, and spec directories for changes in .rb files.
+# It will check the app, lib, and spec and or test directories for changes in .rb files.
 
-require 'bundler/inline'
-require 'pathname'
-require 'fiber'
+require "bundler/inline"
+require "pathname"
 
 gemfile do
-  source 'https://rubygems.org'
+  source "https://rubygems.org"
 
-  gem 'listen', require: true
+  gem "listen", require: true
+end
+
+
+def rspec?
+  @rspec ||= Pathname.new(".").children.map(&:to_s).include? "spec"
 end
 
 SPRING_ENABLED = $ARGV.include?("--spring")
 ONLY_FAILURES = $ARGV.include?("--only-failures")
-RSPEC_FOCUS = $ARGV.find{|arg| arg.match?("_spec.rb")}
-RSPEC_COMMAND = ENV.fetch('RSPEC_COMMAND') { "bundle exec #{"spring " if SPRING_ENABLED}rspec -f doc  #{"--only-failures" if ONLY_FAILURES}" }
+FOCUSSED_TEST = $ARGV.find { |arg| arg.match?("_spec.rb") || arg.match?("_test.rb") }
+command = rspec? ? "rspec -f doc #{"--only-failures" if ONLY_FAILURES}" : "rake test"
+BASE_COMMAND = "bundle exec #{"spring " if SPRING_ENABLED}#{command}"
 
-trap 'SIGINT' do
-  puts 'Exiting...'
+trap "SIGINT" do
+  puts "Exiting..."
   exit 0
 end
 
 def run_spec(test_file)
-  command = "#{RSPEC_COMMAND} #{test_file}"
+  test_file = rspec? ? test_file : "TEST=#{test_file}"
+  command = "#{BASE_COMMAND} #{test_file}"
   puts "Running #{command} ..."
   Kernel.system(command)
   result = $CHILD_STATUS
@@ -33,33 +38,39 @@ def run_spec(test_file)
   [result, nil, errors]
 end
 
-def spec_file(path)
+
+def spec_or_test_file(path)
   test_file_string = path.to_s
 
-  test_file = if RSPEC_FOCUS
-                RSPEC_FOCUS
-              elsif test_file_string.end_with?('_spec.rb') && test_file_string.start_with?('spec/')
-                path
-              elsif test_file_string.start_with?('app/controllers')
-                File.join('./spec', 'requests', path.relative_path_from('app/controllers')).sub('_controller.rb', '_spec.rb') || File.join('./spec', path.relative_path_from('app/')).sub('.rb', '_spec.rb')
-              elsif test_file_string.start_with?('app/')
-                File.join('./spec', path.relative_path_from('app/')).sub('.rb', '_spec.rb')
-              elsif test_file_string.start_with?('lib/')
-                File.join('./spec', path).sub('.rb', '_spec.rb')
-              end
+  spec_or_test = rspec? ? "spec" : "test"
 
-  test_file && (File.exist?(test_file) || RSPEC_FOCUS) ? test_file : nil
+  test_file = if FOCUSSED_TEST
+    FOCUSSED_TEST
+  elsif test_file_string.end_with?("_#{spec_or_test}.rb") && test_file_string.start_with?("#{spec_or_test}/")
+    path
+  elsif test_file_string.start_with?("app/controllers")
+    File.join("./#{spec_or_test}", "requests", path.relative_path_from("app/controllers")).sub("_controller.rb", "_#{spec_or_test}.rb") || File.join("./#{spec_or_test}", path.relative_path_from("app/")).sub(".rb", "_#{spec_or_test}.rb")
+  elsif test_file_string.start_with?("app/")
+    File.join("./#{spec_or_test}", path.relative_path_from("app/")).sub(".rb", "_#{spec_or_test}.rb")
+  elsif test_file_string.start_with?("lib/")
+    File.join("./#{spec_or_test}", path).sub(".rb", "_#{spec_or_test}.rb")
+  end
+
+  (test_file && (File.exist?(test_file) || FOCUSSED_TEST)) ? test_file : nil
 end
 
 queue = Queue.new
 
-listener = Listen.to('./app', './lib', './spec', relative: true, only: /.rb$/) do |modified, added, _removed|
+watch_dirs = %w[./app ./lib]
+watch_dirs << "./spec" if rspec?
+watch_dirs << "./test" if !rspec?
+
+listener = Listen.to(*watch_dirs, relative: true, only: /.rb$/) do |modified, added, _removed|
   next unless modified.any? || added.any?
 
   files = modified + added
-
   files.map { |path_name| Pathname.new(path_name) }.each do |path|
-    if (test_file = spec_file(path))
+    if (test_file = spec_or_test_file(path))
       queue << test_file
     else
       puts "No testfile found for #{path}..."
@@ -68,7 +79,11 @@ listener = Listen.to('./app', './lib', './spec', relative: true, only: /.rb$/) d
 end
 
 puts "Started listening..."
-puts "  Focussing only on #{RSPEC_FOCUS}" if RSPEC_FOCUS
+puts "  Commands are run using spring" if SPRING_ENABLED
+puts "  Focussing only on #{FOCUSSED_TEST}" if FOCUSSED_TEST
+
+# directly run a focussed test
+queue << FOCUSSED_TEST if FOCUSSED_TEST
 
 background_fiber = Fiber.new do
   listener.start
